@@ -1,25 +1,60 @@
-*{box-sizing:border-box}
-
-html,body{
-    margin:0;
-    padding:0;
-    height:100%;
-    overflow:hidden;
-    background:#eefaf1;
-    font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
-    -webkit-font-smoothing:antialiased;
+html,
+body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: radial-gradient(circle at center, #10251f 0%, #071114 48%, #020406 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
-#stage{
-    position:fixed;
-    inset:0;
-    overflow:hidden;
+canvas {
+    display: block;
 }
 
-canvas{
-    display:block;
-    position:fixed;
-    inset:0;
+#hint {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    transform: translateX(-50%);
+    z-index: 10;
+    padding: 12px 20px;
+    color: rgba(235, 255, 244, 0.86);
+    background: rgba(0, 16, 18, 0.28);
+    border: 1px solid rgba(180, 255, 225, 0.14);
+    border-radius: 999px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 0 24px rgba(110, 255, 190, 0.08);
+    text-align: center;
+    pointer-events: none;
+    user-select: none;
 }
 
-/* 摄像头画面本身由 p5 绘制，这里只负责容器与滚动锁定 */
+#hint .title {
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+    color: rgba(230, 255, 245, 0.95);
+}
+
+#hint .line {
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+#hint .small {
+    margin-top: 4px;
+    font-size: 11px;
+    opacity: 0.55;
+}
+
+@media (max-width: 720px) {
+    #hint {
+    width: calc(100vw - 40px);
+    border-radius: 18px;
+    }
+
+    #hint .line {
+    white-space: normal;
+    line-height: 1.5;
+    }
+}
