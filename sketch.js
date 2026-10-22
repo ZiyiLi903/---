@@ -1,913 +1,955 @@
-/* ============================================================
-指尖菜园 · Finger Garden
-p5.js  +  ml5.handPose  +  p5.AudioIn
-------------------------------------------------------------
-开场页 / 加载页 / 种植页 全部由 p5 绘制
-   ============================================================ */
-p5.disableFriendlyErrors = true;
+let video;
+let handpose;
+let predictions = [];
 
-/* ---------------- 蔬菜配置 ---------------- */
-const VEGGIES = {
-    greens: {
-    name: '小青菜',
-    stemColor: [150, 255, 200],
-    leafColor: [120, 240, 170],
-    flowerColor: [210, 255, 230],
-    fruitColor: [160, 255, 180],
-    maxHeight: 165, stemWidth: 7, leafCount: 6, fruitCount: 1,
-    needPollinate: false, followLight: false
-    },
-    sunflower: {
-    name: '向日葵',
-    stemColor: [160, 255, 190],
-    leafColor: [130, 240, 160],
-    flowerColor: [255, 228, 120],
-    fruitColor: [255, 205, 95],
-    maxHeight: 235, stemWidth: 9, leafCount: 5, fruitCount: 1,
-    needPollinate: false, followLight: true
-    },
-    tomato: {
-    name: '番茄',
-    stemColor: [160, 255, 195],
-    leafColor: [125, 240, 165],
-    flowerColor: [255, 246, 180],
-    fruitColor: [255, 105, 105],
-    maxHeight: 200, stemWidth: 8, leafCount: 5, fruitCount: 3,
-    needPollinate: true, followLight: false
-    }
-};
+let hintDiv;
+let modelReady = false;
 
-/* ---------------- 全局状态 ---------------- */
-let appState = 'intro';        // intro | loading | play
+let mic;
+let fft;
+let lastLevel = 0;
+let clapCooldown = 0;
 
-let video = null;
-let handPose = null;
-let hands = [];
-let audioIn = null;
-let started = false;
-
-let plant = null;
+let garden;
 let particles = [];
-let butterflies = [];
-let currentKind = 'greens';
+let petals = [];
+let butterfly;
 
-let handTips = null;
+let lastPinchTime = 0;
+let gestureText = "等待手掌进入画面";
 
-const view = { scale: 1, ox: 0, oy: 0, dw: 0, dh: 0 };
-
-/* 平滑后的手势状态 */
-const G = {
-    present: 0, pinch: 0, open: 0, fist: 0,
-    x: 0.5, y: 0.5, vx: 0, vy: 0, motion: 0
+const STAGE = {
+  EMPTY: 0,
+  SEED: 1,
+  GROWING: 2,
+  BLOOM: 3,
+  POLLINATED: 4,
+  FRUIT: 5
 };
 
-/* 声音 */
-let clapPulse = 0;
-let lastClapTime = -9999;
-let audioLevel = 0;
-let audioBase = 0;
-
-/* 开场页 */
-let introDots = [];
-let introBtn = { x: 0, y: 0, w: 0, h: 0 };
-let introHover = false;
-let bgGfx = null;
-
-
-
-function preload() {
-    handPose = ml5.handPose({ maxHands: 1 });
-}
+let harvestCount = 0;
 
 function setup() {
-    const c = createCanvas(windowWidth, windowHeight);
-    c.position(0, 0);
-    pixelDensity(1);
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
 
-    textAlign(CENTER, CENTER);
-    textFont('system-ui, "PingFang SC", "Microsoft YaHei", sans-serif');
+  hintDiv = select("#hint");
 
-    buildBackdrop();
-    initIntroDots();
-    computeView();
+  video = createCapture({
+    video: {
+      width: 640,
+      height: 480,
+      facingMode: "user"
+    },
+    audio: false
+  });
+
+  video.size(640, 480);
+  video.hide();
+
+  handpose = ml5.handpose(video, () => {
+    modelReady = true;
+    console.log("HandPose model ready");
+  });
+
+  handpose.on("predict", results => {
+    predictions = results;
+  });
+
+  mic = new p5.AudioIn();
+  mic.start();
+
+  fft = new p5.FFT(0.8, 256);
+  fft.setInput(mic);
+
+  garden = new GardenPlant();
+  butterfly = new Butterfly();
+
+  for (let i = 0; i < 90; i++) {
+    particles.push(new GlowParticle());
+  }
+
+  for (let i = 0; i < 18; i++) {
+    petals.push(new FloatingPetal());
+  }
+}
+
+function draw() {
+  drawCameraBackground();
+  drawDarkStageOverlay();
+
+  const hand = getMainHand();
+  const gestures = analyzeHand(hand);
+
+  handleStateMachine(gestures, hand);
+  detectClap();
+
+  updateAmbientParticles();
+
+  garden.update();
+  garden.display();
+
+  butterfly.update(garden);
+  butterfly.display();
+
+  displayHarvestBook();
+  displayGestureDebug(gestures);
+
+  updateDynamicHint(gestures);
 }
 
 function windowResized() {
-    resizeCanvas(windowWidth, windowHeight);
-    buildBackdrop();
-    initIntroDots();
-    computeView();
+  resizeCanvas(windowWidth, windowHeight);
+  video.size(width, height);
 }
 
-/* 摄像头画面以 cover 方式铺满 */
-function computeView() {
-    const vw = (video && video.elt && video.elt.videoWidth) || 640;
-    const vh = (video && video.elt && video.elt.videoHeight) || 480;
-    const s = max(width / vw, height / vh);
-    view.scale = s;
-  view.dw = vw * s;
-  view.dh = vh * s;
-    view.ox = (width - view.dw) / 2;
-    view.oy = (height - view.dh) / 2;
+/* -------------------------------------------------------
+    摄像头与舞台背景
+------------------------------------------------------- */
+
+function drawCameraBackground() {
+  push();
+  translate(width, 0);
+  scale(-1, 1);
+  image(video, 0, 0, width, height);
+  pop();
 }
 
-/* ============================================================
-    主循环
-   ============================================================ */
-function draw() {
-    if (appState === 'intro')   { drawIntro();   return; }
-    if (appState === 'loading') { drawLoading(); return; }
-    drawPlay();
-}
+function drawDarkStageOverlay() {
+  noStroke();
 
-/* ============================================================
-    开场页
-   ============================================================ */
-function buildBackdrop() {
-    bgGfx = createGraphics(width, height);
-    bgGfx.noStroke();
-    const c1 = color(240, 252, 244);
-    const c2 = color(196, 231, 209);
-    for (let y = 0; y < height; y += 2) {
-    bgGfx.fill(lerpColor(c1, c2, y / height));
-    bgGfx.rect(0, y, width, 2);
-    }
-}
+  // 深色半透明压暗，使植物自发光突出
+  fill(3, 9, 12, 120);
+  rect(0, 0, width, height);
 
-function initIntroDots() {
-    introDots = [];
-  const n = constrain(floor(width * height / 26000), 26, 70);
-    for (let i = 0; i < n; i++) {
-    introDots.push({
-    x: random(width),
-    y: random(height),
-    r: random(2, 7),
-    sp: random(0.12, 0.5),
-    a: random(40, 110),
-    ph: random(TWO_PI)
-    });
-}
-}
+  // 中心墨绿色舞台感
+  let cx = width * 0.5;
+  let cy = height * 0.55;
 
-function drawIntro() {
-  const t = millis() * 0.001;
+  for (let r = 900; r > 0; r -= 24) {
+    let a = map(r, 900, 0, 0, 52);
+    fill(15, 54, 43, a);
+    ellipse(cx, cy, r * 1.45, r);
+  }
 
-    if (bgGfx) image(bgGfx, 0, 0);
-
-  /* --- 漂浮光点 --- */
-    noStroke();
-    for (const d of introDots) {
-    d.y -= d.sp;
-    d.x += sin(t * 0.6 + d.ph) * 0.16;
-    if (d.y < -14) { d.y = height + 14; d.x = random(width); }
-    const a = d.a * (0.55 + 0.45 * sin(t * 1.1 + d.ph));
-    fill(120, 198, 152, a);
-    circle(d.x, d.y, d.r);
-    }
-
-  /* --- 卡片尺寸 --- */
-    const s  = constrain(min(width / 1000, height / 780), 0.5, 1.3);
-  const cw = min(620 * s, width * 0.92);
-  const ch = min(620 * s, height * 0.92);
-    const cx = width / 2;
-    const cy = height / 2;
-    const left = cx - cw / 2;
-    const top  = cy - ch / 2;
-
-  /* --- 卡片 --- */
-    push();
-    noStroke();
-    fill(255, 255, 255, 128);
-  rect(left, top, cw, ch, 16 * s);
+  // 暗角
+  for (let r = 0; r < 280; r += 8) {
     noFill();
-    stroke(86, 168, 110, 205);
-  strokeWeight(1.6 * s);
-  rect(left, top, cw, ch, 16 * s);
-    pop();
-
-  /* --- 标题 --- */
-    push();
-    noStroke();
-    textAlign(CENTER, CENTER);
-
-    fill(28, 92, 52);
-  textSize(48 * s);
-  text('指 尖 菜 园', cx, top + 92 * s);
-
-  /* --- 副标题 --- */
-    fill(66, 128, 88, 225);
-  textSize(13.5 * s);
-  text('手势与声音，在指间种出一座会生长的菜园', cx, top + 142 * s);
-
-  /* --- 分隔线 --- */
-    stroke(120, 190, 145, 120);
-    strokeWeight(1);
-  line(cx - cw * 0.3, top + 172 * s, cx + cw * 0.3, top + 172 * s);
-    noStroke();
-
-  /* --- 手势提示 --- */
-    const tips = [
-    '🤏  捏合手指 — 播下种子',
-    '✋  手掌上抬 — 幼苗破土',
-    '🖐  五指张开 — 植株开花',
-    '👏  拍手轻响 — 蝴蝶授粉',
-    '✊  握拳收拢 — 结出果实'
-    ];
-    fill(38, 104, 60, 235);
-  textSize(14.5 * s);
-    for (let i = 0; i < tips.length; i++) {
-    text(tips[i], cx, top + 218 * s + i * 40 * s);
-    }
-
-  /* --- 按键说明 --- */
-    fill(70, 130, 92, 190);
-  textSize(11.5 * s);
-    text('按键：[1] 小青菜   [2] 向日葵   [3] 番茄   [R] 重来',
-       cx, top + 430 * s);
-
-    pop();
-
-  /* --- 开始按钮 --- */
-  const bw = 216 * s;
-  const bh = 52 * s;
-    const bx = cx - bw / 2;
-  const by = top + ch - 86 * s - bh / 2;
-
-    introBtn = { x: bx, y: by, w: bw, h: bh };
-    introHover = mouseX > bx && mouseX < bx + bw &&
-    mouseY > by && mouseY < by + bh;
-    document.body.style.cursor = introHover ? 'pointer' : 'default';
-
-    push();
-    noStroke();
-    drawingContext.shadowBlur = introHover ? 26 : 12;
-    drawingContext.shadowColor = 'rgba(110,200,140,0.75)';
-    // 方案一：拆成 if / else
-    if (introHover) fill(96, 190, 126);
-    else fill(126, 208, 152);
-    rect(bx, by, bw, bh, bh / 2);
-    drawingContext.shadowBlur = 0;
-
-    fill(255, 255, 255, 245);
-  textSize(16 * s);
-    text('开 始 种 植', cx, by + bh / 2 + 1);
-    pop();
-}
-加载页
-
-function drawLoading() {
-    if (bgGfx) image(bgGfx, 0, 0);
-
-  const t = millis() * 0.001;
-    noStroke();
-    textAlign(CENTER, CENTER);
-
-    fill(30, 96, 54, 235);
-    textSize(16);
-    text('正在唤醒镜头…', width / 2, height / 2 - 30);
-
-    fill(80, 150, 105, 160);
-    textSize(11.5);
-    text('请在浏览器提示中允许摄像头与麦克风', width / 2, height / 2 + 54);
-
-    for (let i = 0; i < 8; i++) {
-    const a = t * 2.2 + i * TWO_PI / 8;
-    fill(96, 190, 126, map(i, 0, 7, 255, 45));
-    circle(width / 2 + cos(a) * 22, height / 2 + 22 + sin(a) * 22, 5.5);
-    }
+    stroke(0, 0, 0, map(r, 0, 280, 0, 95));
+    strokeWeight(8);
+    rect(r * -0.5, r * -0.5, width + r, height + r);
+  }
 }
 
-/* ============================================================
-    启动摄像头与麦克风
-   ============================================================ */
-function beginPlay() {
-    if (appState !== 'intro') return;
-    appState = 'loading';
+/* -------------------------------------------------------
+    手势识别
+------------------------------------------------------- */
 
-  /* 麦克风：失败不影响主流程 */
-    try {
-    userStartAudio().then(() => {
-    try {
-        audioIn = new p5.AudioIn();
-        audioIn.start();
-        started = true;
-    } catch (e) {
-        console.warn('麦克风启动失败：', e);
-    }
-    }).catch(err => console.warn('麦克风未启用，仅手势模式：', err));
-} catch (e) {
-    console.warn('userStartAudio 异常：', e);
+function getMainHand() {
+  if (!predictions || predictions.length === 0) return null;
+  return predictions[0];
 }
 
-  /* 摄像头 */
-    video = createCapture(VIDEO, () => computeView());
-    video.size(640, 480);
-    video.hide();
+function mirroredPoint(p) {
+  // ml5 handpose landmark: [x, y, z]
+  return createVector(width - p[0], p[1]);
+}
 
-  /* 轮询等待首帧，带兜底 */
-    let tries = 0;
-    const check = () => {
-    tries++;
-    const el = video && video.elt;
-    const videoReady = el && el.readyState >= 2 && el.videoWidth > 0;
+function analyzeHand(hand) {
+  if (!hand) {
+    gestureText = "等待手掌进入画面";
+    return {
+      hasHand: false,
+      pinch: false,
+      openPalm: false,
+      fist: false,
+      palmUpHigh: false,
+      palmPos: createVector(width / 2, height * 0.65),
+      pinchPos: createVector(width / 2, height * 0.65),
+      growthIntent: 0
+    };
+  }
 
-    if (videoReady) {
-    computeView();
+  const lm = hand.landmarks;
 
-      /* 手势检测：失败不阻塞进入 play */
-    try {
-        if (handPose && typeof handPose.detectStart === 'function') {
-        handPose.detectStart(el, (results) => { hands = results || []; });
-        } else {
-        console.warn('handPose 尚未就绪，跳过手势检测');
-        }
-    } catch (e) {
-        console.warn('手势检测启动失败：', e);
-    }
+  const wrist = mirroredPoint(lm[0]);
+  const thumbTip = mirroredPoint(lm[4]);
+  const indexTip = mirroredPoint(lm[8]);
+  const middleTip = mirroredPoint(lm[12]);
+  const ringTip = mirroredPoint(lm[16]);
+  const pinkyTip = mirroredPoint(lm[20]);
 
-    initParticles();
-    appState = 'play';
+  const indexMcp = mirroredPoint(lm[5]);
+  const middleMcp = mirroredPoint(lm[9]);
+  const ringMcp = mirroredPoint(lm[13]);
+  const pinkyMcp = mirroredPoint(lm[17]);
+
+  const palmPos = createVector(
+    (wrist.x + indexMcp.x + middleMcp.x + ringMcp.x + pinkyMcp.x) / 5,
+    (wrist.y + indexMcp.y + middleMcp.y + ringMcp.y + pinkyMcp.y) / 5
+  );
+
+  const pinchDist = p5.Vector.dist(thumbTip, indexTip);
+  const handScale = max(60, p5.Vector.dist(wrist, middleMcp) * 2.2);
+
+  const pinch = pinchDist < handScale * 0.28;
+
+  const tips = [thumbTip, indexTip, middleTip, ringTip, pinkyTip];
+  const avgTipDist = tips.reduce((sum, p) => sum + p5.Vector.dist(p, palmPos), 0) / tips.length;
+
+  const fingerSpread =
+    p5.Vector.dist(indexTip, middleTip) +
+    p5.Vector.dist(middleTip, ringTip) +
+    p5.Vector.dist(ringTip, pinkyTip);
+
+  const openPalm =
+    avgTipDist > handScale * 0.72 &&
+    fingerSpread > handScale * 0.75 &&
+    !pinch;
+
+  const fist =
+    avgTipDist < handScale * 0.58 &&
+    p5.Vector.dist(indexTip, palmPos) < handScale * 0.65 &&
+    p5.Vector.dist(middleTip, palmPos) < handScale * 0.65 &&
+    p5.Vector.dist(ringTip, palmPos) < handScale * 0.65 &&
+    p5.Vector.dist(pinkyTip, palmPos) < handScale * 0.65 &&
+    !openPalm;
+
+  const palmUpHigh = palmPos.y < height * 0.58;
+
+  // 手越高，生长目标越大
+  const growthIntent = constrain(map(palmPos.y, height * 0.75, height * 0.18, 0, 1), 0, 1);
+
+  let nowGesture = "";
+  if (pinch) nowGesture = "🤏 捏合";
+  else if (openPalm) nowGesture = "🖐 五指张开";
+  else if (fist) nowGesture = "✊ 握拳";
+  else if (palmUpHigh) nowGesture = "✋ 手掌抬高";
+  else nowGesture = "手掌已识别";
+
+  gestureText = nowGesture;
+
+  return {
+    hasHand: true,
+    pinch,
+    openPalm,
+    fist,
+    palmUpHigh,
+    palmPos,
+    pinchPos: p5.Vector.lerp(thumbTip, indexTip, 0.5),
+    growthIntent
+  };
+}
+
+/* -------------------------------------------------------
+    状态机
+------------------------------------------------------- */
+
+function handleStateMachine(g, hand) {
+  const now = millis();
+
+  // 再次捏合：清空并重新播种
+  if (g.pinch && now - lastPinchTime > 1100) {
+    garden.resetToSeed(g.pinchPos.x, g.pinchPos.y);
+    butterfly.reset();
+    burst(g.pinchPos.x, g.pinchPos.y, color(180, 255, 210), 28);
+    lastPinchTime = now;
     return;
+  }
+
+  if (garden.stage === STAGE.SEED || garden.stage === STAGE.GROWING) {
+    if (g.palmUpHigh) {
+      garden.stage = STAGE.GROWING;
+      garden.baseX = lerp(garden.baseX, g.palmPos.x, 0.025);
+      garden.targetGrowth = max(garden.targetGrowth, g.growthIntent);
+    }
+  }
+
+  if (garden.stage === STAGE.GROWING) {
+    if (garden.growth > 0.82 && g.openPalm) {
+      garden.stage = STAGE.BLOOM;
+      garden.targetBloom = 1;
+      burst(garden.flowerX(), garden.flowerY(), color(255, 210, 235), 40);
+    }
+  }
+
+  if (garden.stage === STAGE.BLOOM || garden.stage === STAGE.POLLINATED) {
+    if (g.openPalm) {
+      garden.targetBloom = 1;
+    }
+  }
+
+  if (garden.stage === STAGE.POLLINATED && g.fist) {
+    garden.stage = STAGE.FRUIT;
+    garden.targetFruit = 1;
+    garden.targetBloom = 0;
+    harvestCount++;
+    burst(garden.flowerX(), garden.flowerY(), color(255, 120, 86), 52);
+  }
+
+  // 未授粉握拳不结果，仅轻微反馈
+  if (garden.stage === STAGE.BLOOM && g.fist) {
+    garden.failedPulse = 1;
+  }
+}
+
+function detectClap() {
+  if (!mic) return;
+
+  let level = mic.getLevel();
+  let spike = level - lastLevel;
+
+  clapCooldown = max(0, clapCooldown - deltaTime);
+
+  if (level > 0.16 && spike > 0.055 && clapCooldown <= 0) {
+    if (garden.stage === STAGE.BLOOM) {
+      garden.stage = STAGE.POLLINATED;
+      butterfly.summon(garden.flowerX(), garden.flowerY());
+      burst(width * random(0.2, 0.8), height * random(0.25, 0.55), color(255, 245, 190), 35);
+    } else if (garden.stage === STAGE.POLLINATED) {
+      butterfly.summon(garden.flowerX(), garden.flowerY());
     }
 
-    if (tries > 200) {           // 约 10 秒兜底
-    computeView();
-    initParticles();
-    appState = 'play';
-    return;
-    }
-    setTimeout(check, 50);
-};
-check();
+    clapCooldown = 1300;
+  }
+
+  lastLevel = lerp(lastLevel, level, 0.35);
 }
 
-/* ============================================================
-种植页
-   ============================================================ */
-function drawPlay() {
-background(5, 7, 10);
+/* -------------------------------------------------------
+    植物系统
+------------------------------------------------------- */
 
-  /* --- 摄像头画面（水平镜像） --- */
-if (video && video.elt && video.elt.readyState >= 2) {
-    push();
-    translate(width, 0);
-    scale(-1, 1);
-    image(video, view.ox, view.oy, view.dw, view.dh);
-    pop();
-}
+class GardenPlant {
+  constructor() {
+    this.resetAll();
+  }
 
-  /* --- 压暗背景，衬托自发光主体 --- */
-noStroke();
-fill(5, 7, 10, 158);
-rect(0, 0, width, height);
+  resetAll() {
+    this.stage = STAGE.EMPTY;
 
-  /* --- 识别 --- */
-analyzeHand();
-analyzeAudio();
+    this.baseX = width / 2;
+    this.baseY = height * 0.78;
 
-  /* --- 粒子 --- */
-for (const p of particles) { p.update(); p.render(); }
-particles = particles.filter(p => p.age < p.maxLife);
+    this.seedX = this.baseX;
+    this.seedY = this.baseY;
 
-  /* --- 播种 --- */
-handleSeeding();
+    this.growth = 0;
+    this.targetGrowth = 0;
 
-  /* --- 植物 --- */
-if (plant) { plant.update(); plant.render(); }
-
-  /* --- 蝴蝶 --- */
-for (const b of butterflies) { b.update(); b.render(); }
-
-drawHandOverlay();
-drawHUD();
-}
-
-/* ============================================================
-手势识别
-   ============================================================ */
-function videoToScreen(kp) {
-const s = view.scale;
-  const x = view.ox + kp.x * s;
-  const y = view.oy + kp.y * s;
-  return { x: width - x, y: y };     // 视频已镜像，x 需翻转
-}
-
-function analyzeHand() {
-const tp = { present: 0, pinch: 0, open: 0, fist: 0, x: G.x, y: G.y };
-handTips = null;
-
-if (hands.length > 0 && hands[0].keypoints && hands[0].keypoints.length >= 21) {
-    const kp = hands[0].keypoints;
-    handTips = kp.map(k => videoToScreen(k));
-
-    const wrist = kp[0];
-    const midMcp = kp[9];
-    const hs = max(1, dist(wrist.x, wrist.y, midMcp.x, midMcp.y));
-
-    /* 捏合程度：拇指尖(4) ↔ 食指尖(8)，按手掌尺寸归一化 */
-    const pinchRatio = dist(kp[4].x, kp[4].y, kp[8].x, kp[8].y) / hs;
-
-    /* 手指伸展计数 */
-    let ext = 0;
-    const tips = [8, 12, 16, 20];
-    const pips = [6, 10, 14, 18];
-    for (let i = 0; i < 4; i++) {
-    const dTip = dist(kp[tips[i]].x, kp[tips[i]].y, wrist.x, wrist.y);
-    const dPip = dist(kp[pips[i]].x, kp[pips[i]].y, wrist.x, wrist.y);
-      if (dTip > dPip * 1.22) ext++;
-    }
-    const dThumbTip = dist(kp[4].x, kp[4].y, wrist.x, wrist.y);
-    const dThumbMcp = dist(kp[2].x, kp[2].y, wrist.x, wrist.y);
-    if (dThumbTip > dThumbMcp * 1.35) ext++;
-
-    /* 食指是否伸出（区分「捏合」与「握拳」） */
-    const indexOut = dist(kp[8].x, kp[8].y, wrist.x, wrist.y) >
-                     dist(kp[6].x, kp[6].y, wrist.x, wrist.y) * 1.18;
-
-    const sp = videoToScreen(wrist);
-    tp.present = 1;
-    tp.x = sp.x / width;
-    tp.y = sp.y / height;
-
-    tp.pinch = (pinchRatio < 0.5 && indexOut) ? 1 : 0;
-    tp.open  = (ext >= 4) ? 1 : 0;
-    tp.fist  = (ext <= 1 && !indexOut) ? 1 : 0;
-}
-
-  /* 平滑插值，避免跳变 */
-G.present = lerp(G.present, tp.present, 0.28);
-G.pinch   = lerp(G.pinch,   tp.pinch,   0.40);
-G.open    = lerp(G.open,    tp.open,    0.32);
-G.fist    = lerp(G.fist,    tp.fist,    0.40);
-
-const prevX = G.x, prevY = G.y;
-G.x = lerp(G.x, tp.x, 0.22);
-G.y = lerp(G.y, tp.y, 0.22);
-G.vx = G.x - prevX;
-G.vy = G.y - prevY;
-  G.motion = lerp(G.motion, constrain(abs(G.vx) * 22, 0, 1), 0.25);
-}
-
-/* ============================================================
-声音识别（拍手）
-   ============================================================ */
-function analyzeAudio() {
-clapPulse = 0;
-if (!started || !audioIn) return;
-
-audioLevel = audioIn.getLevel();
-audioBase = lerp(audioBase, audioLevel, 0.02);
-
-const ratio = audioLevel / (audioBase + 0.004);
-if (ratio > 2.4 && audioLevel > 0.08 && millis() - lastClapTime > 550) {
-    lastClapTime = millis();
-    clapPulse = 1;
-
-    for (let i = 0; i < 18; i++) {
-    const a = random(TWO_PI), d = random(30, 140);
-    particles.push(new Particle(
-        width * 0.5 + cos(a) * d,
-        height * 0.45 + sin(a) * d,
-        false
-    ));
-    }
-}
-}
-
-/* ============================================================
-播种
-   ============================================================ */
-function handleSeeding() {
-if (plant) return;
-if (G.pinch > 0.65 && G.present > 0.5) {
-    const sx = constrain(G.x * width, width * 0.15, width * 0.85);
-    const sy = constrain(G.y * height, height * 0.48, height * 0.9);
-    plant = new Plant(currentKind, sx, sy);
-
-    for (let i = 0; i < 20; i++) {
-    const a = random(TWO_PI), d = random(6, 34);
-      particles.push(new Particle(sx + cos(a) * d, sy + sin(a) * d, false));
-    }
-}
-}
-
-/* ============================================================
-发光绘制辅助
-   ============================================================ */
-function glow(c, blur) {
-drawingContext.shadowBlur = blur;
-drawingContext.shadowColor = `rgba(${c[0]},${c[1]},${c[2]},0.85)`;
-}
-function noGlow() {
-drawingContext.shadowBlur = 0;
-}
-
-/* ============================================================
-手部骨架叠层
-   ============================================================ */
-function drawHandOverlay() {
-if (!handTips) return;
-
-push();
-noFill();
-stroke(150, 255, 200, 55);
-strokeWeight(1);
-for (const t of handTips) circle(t.x, t.y, 4);
-
-const tip = handTips[8];
-noStroke();
-fill(190, 255, 220, 85);
-circle(tip.x, tip.y, 14);
-pop();
-}
-
-/* ============================================================
-植物
-   ============================================================ */
-class Plant {
-constructor(kind, x, y) {
-    this.kind = kind;
-    this.cfg = VEGGIES[kind];
-    this.x = x;
-    this.y = y;
-
-    this.phase = 1;          // 1生长 2开花 3授粉 4结果 5完成
-    this.stem = 0;
     this.bloom = 0;
+    this.targetBloom = 0;
+
     this.fruit = 0;
-    this.pollinated = false;
-    this.headAngle = 0;
-    this.seedPhase = random(TWO_PI);
+    this.targetFruit = 0;
 
-    this.leaves = [];
-    const n = this.cfg.leafCount;
-    for (let i = 0; i < n; i++) {
-    this.leaves.push({
-        p: 0.16 + (i / n) * 0.66,
-        side: i % 2 === 0 ? 1 : -1,
-        s: random(0.78, 1.15)
-    });
+    this.pollinatedGlow = 0;
+    this.failedPulse = 0;
+
+    this.swaySeed = random(1000);
+  }
+
+  resetToSeed(x, y) {
+    this.stage = STAGE.SEED;
+
+    this.seedX = x;
+    this.seedY = y;
+
+    this.baseX = x;
+    this.baseY = min(height * 0.84, y + height * 0.18);
+
+    this.growth = 0;
+    this.targetGrowth = 0.08;
+
+    this.bloom = 0;
+    this.targetBloom = 0;
+
+    this.fruit = 0;
+    this.targetFruit = 0;
+
+    this.pollinatedGlow = 0;
+    this.failedPulse = 0;
+  }
+
+  update() {
+    this.growth = lerp(this.growth, this.targetGrowth, 0.035);
+    this.bloom = lerp(this.bloom, this.targetBloom, 0.04);
+    this.fruit = lerp(this.fruit, this.targetFruit, 0.045);
+
+    if (this.stage === STAGE.POLLINATED) {
+      this.pollinatedGlow = lerp(this.pollinatedGlow, 1, 0.035);
+    } else {
+      this.pollinatedGlow = lerp(this.pollinatedGlow, 0, 0.04);
     }
 
-    this.fruits = [];
-    const m = this.cfg.fruitCount;
-    for (let i = 0; i < m; i++) {
-    this.fruits.push({
-        p: m === 1 ? 0.78 : 0.55 + i * 0.15,
-        side: i % 2 === 0 ? 1 : -1,
-        s: random(0.85, 1.15)
-    });
+    this.failedPulse = max(0, this.failedPulse - 0.035);
+  }
+
+  stemHeight() {
+    return lerp(20, min(height * 0.48, 330), easeOutCubic(this.growth));
+  }
+
+  flowerX() {
+    return this.baseX + sin(frameCount * 0.018 + this.swaySeed) * 18 * this.growth;
+  }
+
+  flowerY() {
+    return this.baseY - this.stemHeight();
+  }
+
+  display() {
+    if (this.stage === STAGE.EMPTY) return;
+
+    this.drawSeed();
+    this.drawStemAndLeaves();
+
+    if (this.bloom > 0.01 || this.stage === STAGE.BLOOM || this.stage === STAGE.POLLINATED) {
+      this.drawFlower();
     }
+
+    if (this.fruit > 0.01 || this.stage === STAGE.FRUIT) {
+      this.drawFruit();
+    }
+  }
+
+  drawSeed() {
+    if (this.growth > 0.28) return;
+
+    const a = map(this.growth, 0, 0.28, 220, 0, true);
+    const x = lerp(this.seedX, this.baseX, easeOutCubic(this.growth * 3));
+    const y = lerp(this.seedY, this.baseY, easeOutCubic(this.growth * 3));
+
+    pushGlow(255, 220, 140, 28, a);
+    noStroke();
+    fill(255, 204, 125, a);
+    ellipse(x, y, 15, 21);
+    popGlow();
+  }
+
+  drawStemAndLeaves() {
+    if (this.growth <= 0.01) return;
+
+    const h = this.stemHeight();
+    const topX = this.flowerX();
+    const topY = this.flowerY();
+
+    const c1x = this.baseX - 36;
+    const c1y = this.baseY - h * 0.36;
+    const c2x = this.baseX + 28;
+    const c2y = this.baseY - h * 0.72;
+
+    pushGlow(90, 255, 184, 24, 210);
+
+    noFill();
+    stroke(105, 255, 190, 210);
+    strokeWeight(7);
+    bezier(this.baseX, this.baseY, c1x, c1y, c2x, c2y, topX, topY);
+
+    stroke(195, 255, 224, 110);
+    strokeWeight(2.2);
+    bezier(this.baseX, this.baseY, c1x, c1y, c2x, c2y, topX, topY);
+
+    popGlow();
+
+    this.drawLeaf(0.34, -1, 55 * this.growth);
+    this.drawLeaf(0.55, 1, 68 * this.growth);
+    this.drawLeaf(0.73, -1, 50 * this.growth);
+  }
+
+  pointOnStem(t) {
+    const h = this.stemHeight();
+    const topX = this.flowerX();
+    const topY = this.flowerY();
+
+    const c1x = this.baseX - 36;
+    const c1y = this.baseY - h * 0.36;
+    const c2x = this.baseX + 28;
+    const c2y = this.baseY - h * 0.72;
+
+    const x = bezierPoint(this.baseX, c1x, c2x, topX, t);
+    const y = bezierPoint(this.baseY, c1y, c2y, topY, t);
+    return createVector(x, y);
+  }
+
+  drawLeaf(t, dir, size) {
+    if (this.growth < t * 0.75) return;
+
+    let p = this.pointOnStem(t);
+    let open = constrain(map(this.growth, t * 0.75, t + 0.2, 0, 1), 0, 1);
+    let len = size * easeOutCubic(open);
+    let ang = dir < 0 ? -PI * 0.88 : -PI * 0.12;
+
+    push();
+    translate(p.x, p.y);
+    rotate(ang + sin(frameCount * 0.018 + t * 10) * 0.08);
+
+    pushGlow(80, 255, 180, 20, 160);
+    noStroke();
+    fill(88, 230, 155, 120);
+    beginShape();
+    vertex(0, 0);
+    bezierVertex(len * 0.34, -len * 0.32, len * 0.78, -len * 0.22, len, 0);
+    bezierVertex(len * 0.65, len * 0.25, len * 0.22, len * 0.22, 0, 0);
+    endShape(CLOSE);
+
+    stroke(200, 255, 225, 90);
+    strokeWeight(1);
+    line(0, 0, len * 0.88, 0);
+    popGlow();
+
+    pop();
+  }
+
+  drawFlower() {
+    const x = this.flowerX();
+    const y = this.flowerY();
+
+    const b = easeOutCubic(this.bloom);
+    const flowerAlpha = 235 * b * (1 - this.fruit * 0.8);
+    if (flowerAlpha <= 2) return;
+
+    const pulse = 1 + sin(frameCount * 0.045) * 0.04;
+    const failShake = this.failedPulse * sin(frameCount * 0.8) * 5;
+
+    push();
+    translate(x + failShake, y);
+
+    pushGlow(255, 190, 230, 42 + this.pollinatedGlow * 22, flowerAlpha);
+
+    noStroke();
+
+    // 花瓣光晕
+    fill(255, 205, 232, 28 * b);
+    ellipse(0, 0, 118 * b, 118 * b);
+
+    for (let i = 0; i < 7; i++) {
+      let a = TWO_PI * i / 7 + frameCount * 0.002;
+      let px = cos(a) * 24 * b;
+      let py = sin(a) * 24 * b;
+
+      push();
+      translate(px, py);
+      rotate(a);
+      fill(255, 224, 242, flowerAlpha);
+      ellipse(18 * b * pulse, 0, 38 * b, 18 * b);
+      pop();
+    }
+
+    fill(255, 246, 190, flowerAlpha);
+    ellipse(0, 0, 20 * b, 20 * b);
+
+    if (this.pollinatedGlow > 0.01) {
+      fill(255, 238, 150, 80 * this.pollinatedGlow);
+      ellipse(0, 0, 60 * this.pollinatedGlow, 60 * this.pollinatedGlow);
+    }
+
+    popGlow();
+    pop();
+  }
+
+  drawFruit() {
+    const x = this.flowerX();
+    const y = this.flowerY();
+    const f = easeOutCubic(this.fruit);
+
+    if (f <= 0.01) return;
+
+    push();
+    translate(x, y + 10 * f);
+
+    pushGlow(255, 96, 62, 50, 240);
+
+    noStroke();
+
+    fill(255, 80, 55, 230);
+    ellipse(0, 12, 58 * f, 54 * f);
+
+    fill(255, 142, 92, 115);
+    ellipse(-12 * f, 2 * f, 20 * f, 14 * f);
+
+    fill(255, 190, 110, 55);
+    ellipse(0, 12, 86 * f, 76 * f);
+
+    // 番茄蒂
+    fill(80, 230, 140, 210);
+    for (let i = 0; i < 5; i++) {
+      push();
+      rotate(TWO_PI * i / 5);
+      triangle(0, -16 * f, -5 * f, -3 * f, 5 * f, -3 * f);
+      pop();
+    }
+
+    popGlow();
+    pop();
+  }
 }
 
-update() {
-    const dt = min(deltaTime, 50) / 1000;
+/* -------------------------------------------------------
+   蝴蝶
+------------------------------------------------------- */
 
-    /* 向日葵：花盘追手 */
-    if (this.cfg.followLight && G.present > 0.5) {
-      const target = constrain((G.x - 0.5) * 1.5, -0.8, 0.8);
-    this.headAngle = lerp(this.headAngle, target, 0.06);
+class Butterfly {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.active = false;
+    this.arrived = false;
+    this.x = -100;
+    this.y = height * 0.3;
+    this.tx = width / 2;
+    this.ty = height / 2;
+    this.t = 0;
+    this.seed = random(999);
+  }
+
+  summon(x, y) {
+    this.active = true;
+    this.arrived = false;
+
+    this.x = random() < 0.5 ? -80 : width + 80;
+    this.y = random(height * 0.18, height * 0.58);
+
+    this.tx = x;
+    this.ty = y - 20;
+
+    this.t = 0;
+    this.seed = random(999);
+  }
+
+  update(plant) {
+    if (!this.active) return;
+
+    this.tx = lerp(this.tx, plant.flowerX(), 0.04);
+    this.ty = lerp(this.ty, plant.flowerY() - 18, 0.04);
+
+    this.t += 0.012;
+
+    const ease = easeOutCubic(constrain(this.t, 0, 1));
+
+    const nx = noise(this.seed + frameCount * 0.01) - 0.5;
+    const ny = noise(this.seed + 80 + frameCount * 0.012) - 0.5;
+
+    this.x = lerp(this.x, this.tx, 0.025 + ease * 0.025) + nx * 3;
+    this.y = lerp(this.y, this.ty, 0.025 + ease * 0.025) + ny * 3;
+
+    if (dist(this.x, this.y, this.tx, this.ty) < 24) {
+      this.arrived = true;
     }
+  }
 
-    switch (this.phase) {
-      /* 生长：手掌上抬 */
-    case 1:
-        if (G.open > 0.5 && G.vy < -0.00015) {
-        let rate = 0.62;
-        if (this.cfg.followLight) {
-            rate *= map(G.motion, 0, 1, 0.30, 2.2, true);
-        }
-          this.stem = min(1, this.stem + rate * dt);
-        }
-        if (this.stem >= 1) this.phase = 2;
-        break;
+  display() {
+    if (!this.active) return;
 
-      /* 开花：五指张开 */
-    case 2:
-        if (G.open > 0.5) this.bloom = min(1, this.bloom + 0.72 * dt);
-        if (this.bloom >= 1) {
-        this.phase = this.cfg.needPollinate ? 3 : 4;
-        }
-        break;
-
-      /* 授粉：拍手 */
-    case 3:
-        if (clapPulse > 0) {
-        this.pollinated = true;
-        this.phase = 4;
-        this.spawnButterflies();
-        }
-        break;
-
-      /* 结果：握拳 */
-    case 4:
-        if (G.fist > 0.5) this.fruit = min(1, this.fruit + 0.62 * dt);
-        if (this.fruit >= 1) this.phase = 5;
-        break;
-    }
-}
-
-spawnButterflies() {
-    const topX = this.x;
-    const topY = this.y - this.cfg.maxHeight * this.stem;
-    for (let i = 0; i < 3; i++) {
-    butterflies.push(new Butterfly({ x: topX, y: topY }));
-    }
-}
-
-render() {
-    const cfg = this.cfg;
-    const t = millis() * 0.001;
-    const h = cfg.maxHeight * this.stem;
-    const sway = sin(t * 0.75 + this.seedPhase) * 11 * this.stem;
+    const flap = sin(frameCount * 0.32) * 0.5 + 0.5;
+    const wing = lerp(12, 28, flap);
 
     push();
     translate(this.x, this.y);
+
+    pushGlow(255, 228, 160, 26, 200);
+
     noStroke();
 
-    /* 种子 */
-    if (this.stem < 0.05) {
-    glow([190, 255, 220], 34);
-    fill(210, 255, 230, 240);
-      circle(0, -2, 9 + sin(t * 5) * 2.5);
-    noGlow();
-    }
+    fill(255, 220, 150, 165);
+    ellipse(-wing * 0.42, -4, wing, 20);
+    ellipse(wing * 0.42, -4, wing, 20);
 
-    /* 茎 */
-    const N = 22;
-    for (let i = 0; i <= N; i++) {
-    const p = i / N;
-      const px = sway * p * p;
-      const py = -h * p;
-      const r = lerp(cfg.stemWidth * 0.5, 1.6, p) * (0.5 + 0.5 * this.stem);
-    glow(cfg.stemColor, 20);
-    fill(cfg.stemColor[0], cfg.stemColor[1], cfg.stemColor[2], 240);
-      circle(px, py, r * 2);
-    }
-    noGlow();
+    fill(255, 245, 210, 125);
+    ellipse(-wing * 0.32, 7, wing * 0.72, 15);
+    ellipse(wing * 0.32, 7, wing * 0.72, 15);
 
-    /* 叶 */
-    for (const L of this.leaves) {
-    if (this.stem <= L.p) continue;
-    const g = constrain((this.stem - L.p) / 0.2, 0, 1);
-    const p = L.p;
-      const px = sway * p * p;
-      const py = -h * p;
-      const len = 52 * L.s * g;
-      const wid = 17 * L.s * g;
-    if (len < 2) continue;
+    fill(70, 45, 35, 210);
+    ellipse(0, 0, 5, 22);
 
-    push();
-    translate(px, py);
-      const wobble = sin(t * 1.1 + p * 6) * 0.07;
-    rotate(L.side > 0 ? -0.45 + wobble : PI + 0.45 - wobble);
-    glow(cfg.leafColor, 16);
-    fill(cfg.leafColor[0], cfg.leafColor[1], cfg.leafColor[2], 215);
-      ellipse(len * 0.5, 0, len, wid);
-    noGlow();
+    stroke(255, 235, 180, 135);
+    strokeWeight(1);
+    line(0, -8, -7, -18);
+    line(0, -8, 7, -18);
+
+    popGlow();
     pop();
-    }
-
-    /* 花 / 顶冠 */
-    if (this.bloom > 0.02) {
-    push();
-    translate(sway, -h);
-    rotate(this.headAngle);
-    this.drawBloom(this.bloom, t);
-    pop();
-    }
-
-    /* 果 */
-    if (this.fruit > 0.02) {
-    const f = this.fruit;
-    const fc = cfg.fruitColor;
-    for (const F of this.fruits) {
-        const p = F.p;
-        const px = sway * p * p;
-        const py = -h * p;
-        const r = 15 * F.s * f;
-        if (r < 1) continue;
-
-        push();
-        translate(px + F.side * 13 * f, py + 10 * f);
-        glow(fc, 28);
-        fill(fc[0], fc[1], fc[2], 245);
-        circle(0, 0, r * 2);
-        noGlow();
-        fill(255, 255, 255, 130);
-        circle(-r * 0.32, -r * 0.34, r * 0.55);
-        pop();
-    }
-    }
-
-    pop();
+  }
 }
 
-drawBloom(b, t) {
-    const cfg = this.cfg;
-    const fc = cfg.flowerColor;
-    noStroke();
+/* -------------------------------------------------------
+   粒子与花瓣
+------------------------------------------------------- */
 
-    if (this.kind === 'sunflower') {
-    const petals = 18;
-    for (let i = 0; i < petals; i++) {
-        push();
-        rotate(TWO_PI * i / petals + sin(t * 0.6) * 0.015);
-        glow(fc, 24);
-        fill(fc[0], fc[1], fc[2], 235);
-        ellipse(0, -30 * b, 12 * b, 38 * b);
-        noGlow();
-        pop();
+class GlowParticle {
+  constructor() {
+    this.reset(true);
+  }
+
+  reset(initial = false) {
+    this.x = random(width);
+    this.y = initial ? random(height) : height + random(40);
+    this.vx = random(-0.18, 0.18);
+    this.vy = random(-0.65, -0.16);
+    this.r = random(1.2, 3.6);
+    this.life = random(0.4, 1);
+    this.kind = random() < 0.55 ? "warm" : "cool";
+    this.seed = random(999);
+  }
+
+  update() {
+    this.x += this.vx + sin(frameCount * 0.01 + this.seed) * 0.12;
+    this.y += this.vy;
+    this.life -= 0.0015;
+
+    if (this.y < -20 || this.life <= 0) {
+      this.reset(false);
     }
-      fill(92, 58, 30, 245);   circle(0, 0, 46 * b);
-      fill(150, 100, 55, 245); circle(0, 0, 30 * b);
-      fill(70, 44, 22, 245);   circle(0, 0, 14 * b);
+  }
 
-    } else if (this.kind === 'tomato') {
-    for (let i = 0; i < 5; i++) {
-        const a = TWO_PI * i / 5;
-        push();
-        translate(cos(a) * 22 * b, sin(a) * 14 * b - 6 * b);
-        for (let j = 0; j < 5; j++) {
-        push();
-          rotate(TWO_PI * j / 5 + t * 0.15);
-        glow(fc, 14);
-        fill(fc[0], fc[1], fc[2], 230);
-          ellipse(0, -5 * b, 4.5 * b, 11 * b);
-        noGlow();
-        pop();
-        }
-        fill(255, 252, 210, 240);
-        circle(0, 0, 5 * b);
-        pop();
-    }
-
+  display() {
+    let a = 130 * this.life;
+    if (this.kind === "warm") {
+      pushGlow(255, 220, 120, 16, a);
+      fill(255, 224, 145, a);
     } else {
-    for (let i = 0; i < 7; i++) {
-        const a = map(i, 0, 6, -1.25, 1.25);
-        push();
-        rotate(a);
-        glow(cfg.leafColor, 16);
-        fill(cfg.leafColor[0], cfg.leafColor[1], cfg.leafColor[2], 205);
-        ellipse(0, -34 * b, 20 * b, 66 * b);
-        noGlow();
-        pop();
+      pushGlow(220, 255, 250, 14, a);
+      fill(230, 255, 252, a);
     }
-    }
-}
+
+    noStroke();
+    ellipse(this.x, this.y, this.r, this.r);
+    popGlow();
+  }
 }
 
-/* ============================================================
-粒子
-   ============================================================ */
-class Particle {
-constructor(x, y, ambient = true) {
+class FloatingPetal {
+  constructor() {
+    this.reset(true);
+  }
+
+  reset(initial = false) {
+    this.x = random(width);
+    this.y = initial ? random(height) : random(-120, -20);
+    this.vx = random(-0.25, 0.25);
+    this.vy = random(0.08, 0.38);
+    this.s = random(10, 24);
+    this.a = random(20, 58);
+    this.seed = random(1000);
+  }
+
+  update() {
+    this.x += this.vx + sin(frameCount * 0.008 + this.seed) * 0.22;
+    this.y += this.vy;
+    if (this.y > height + 80) this.reset(false);
+  }
+
+  display() {
+    push();
+    translate(this.x, this.y);
+    rotate(sin(frameCount * 0.01 + this.seed) * 0.9);
+
+    pushGlow(255, 205, 230, 12, this.a);
+    noStroke();
+    fill(255, 218, 236, this.a);
+    ellipse(0, 0, this.s, this.s * 0.42);
+    popGlow();
+
+    pop();
+  }
+}
+
+function updateAmbientParticles() {
+  for (let p of particles) {
+    p.update();
+    p.display();
+  }
+
+  for (let p of petals) {
+    p.update();
+    p.display();
+  }
+}
+
+function burst(x, y, c, count = 30) {
+  for (let i = 0; i < count; i++) {
+    particles.push(new BurstParticle(x, y, c));
+  }
+
+  // 避免粒子无限增长
+  if (particles.length > 180) {
+    particles.splice(0, particles.length - 180);
+  }
+}
+
+class BurstParticle {
+  constructor(x, y, c) {
     this.x = x;
     this.y = y;
-    this.ambient = ambient;
-    this.vx = random(-0.28, 0.28);
-    this.vy = random(-0.75, -0.15);
-    this.size = random(1, 3.4);
-    this.alpha = random(45, 135);
-    this.phase = random(TWO_PI);
-    this.hue = random() > 0.5 ? [255, 230, 160] : [200, 240, 255];
-    this.age = 0;
-    this.maxLife = ambient ? Infinity : random(0.8, 1.7);
-}
+    const a = random(TWO_PI);
+    const s = random(0.8, 4.2);
+    this.vx = cos(a) * s;
+    this.vy = sin(a) * s;
+    this.r = random(2, 5);
+    this.life = 1;
+    this.c = c;
+  }
 
-update() {
-    const dt = min(deltaTime, 50) / 1000;
-    this.age += dt;
-    this.x += this.vx + sin(millis() * 0.001 + this.phase) * 0.16;
+  update() {
+    this.x += this.vx;
     this.y += this.vy;
+    this.vx *= 0.96;
+    this.vy *= 0.96;
+    this.vy -= 0.006;
+    this.life -= 0.025;
 
-    if (this.ambient) {
-    if (this.y < -12) { this.y = height + 12; this.x = random(width); }
-    if (this.x < -12) this.x = width + 12;
-    if (this.x > width + 12) this.x = -12;
+    if (this.life <= 0) {
+      this.resetAsAmbient();
     }
-}
+  }
 
-render() {
-    const fade = this.maxLife === Infinity ? 1 : (1 - this.age / this.maxLife);
-    if (fade <= 0) return;
+  resetAsAmbient() {
+    this.x = random(width);
+    this.y = height + random(30);
+    this.vx = random(-0.18, 0.18);
+    this.vy = random(-0.65, -0.16);
+    this.r = random(1.2, 3.2);
+    this.life = random(0.5, 1);
+    this.c = random() < 0.5 ? color(255, 224, 145) : color(230, 255, 252);
+  }
+
+  display() {
+    let rr = red(this.c);
+    let gg = green(this.c);
+    let bb = blue(this.c);
+    let a = 180 * this.life;
+
+    pushGlow(rr, gg, bb, 18, a);
     noStroke();
-    fill(this.hue[0], this.hue[1], this.hue[2], this.alpha * fade);
-    circle(this.x, this.y, this.size);
-}
-}
-
-function initParticles() {
-particles = particles.filter(p => !p.ambient);
-for (let i = 0; i < 70; i++) {
-    particles.push(new Particle(random(width), random(height), true));
-}
+    fill(rr, gg, bb, a);
+    ellipse(this.x, this.y, this.r, this.r);
+    popGlow();
+  }
 }
 
-/* ============================================================
-蝴蝶
-   ============================================================ */
-class Butterfly {
-constructor(target) {
-    this.x = random(width * 0.1, width * 0.9);
-    this.y = random(height * 0.1, height * 0.6);
-    this.target = target;
-    this.wingPhase = random(TWO_PI);
-    this.alpha = 0;
-    this.tx = target.x;
-    this.ty = target.y;
+/* -------------------------------------------------------
+    显示辅助信息
+------------------------------------------------------- */
+
+function displayHarvestBook() {
+  push();
+  textAlign(RIGHT, TOP);
+  textSize(13);
+  noStroke();
+  fill(230, 255, 244, 130);
+  text(`菜园图鉴：番茄 × ${harvestCount}`, width - 24, 24);
+  pop();
 }
 
-update() {
-    const tt = millis() * 0.001;
-    this.tx = this.target.x + sin(tt * 1.4 + this.wingPhase) * 62;
-    this.ty = this.target.y - 62 + cos(tt * 1.9 + this.wingPhase) * 40;
+function displayGestureDebug(g) {
+  push();
+  textAlign(LEFT, TOP);
+  textSize(13);
+  noStroke();
+  fill(230, 255, 244, 115);
 
-    this.x = lerp(this.x, this.tx, 0.018);
-    this.y = lerp(this.y, this.ty, 0.018);
-    this.alpha = lerp(this.alpha, 255, 0.03);
+  let stageName = [
+    "空园",
+    "种子",
+    "生长",
+    "开花",
+    "已授粉",
+    "结果"
+  ][garden.stage];
+
+  text(`${gestureText}　｜　阶段：${stageName}`, 24, 24);
+  pop();
 }
 
-render() {
-    push();
-    translate(this.x, this.y);
-    const flap = abs(sin(millis() * 0.012 + this.wingPhase));
-    const s = 0.5 + flap * 0.75;
-    noStroke();
+/* -------------------------------------------------------
+    工具函数
+------------------------------------------------------- */
 
-    glow([255, 200, 255], 22);
-    fill(255, 220, 245, this.alpha * 0.85);
-    ellipse(-9 * s, 0, 20 * s, 14);
-    ellipse( 9 * s, 0, 20 * s, 14);
-    noGlow();
-
-    fill(255, 255, 255, this.alpha);
-    ellipse(-6 * s, 0, 10 * s, 8);
-    ellipse( 6 * s, 0, 10 * s, 8);
-
-    fill(120, 90, 140, this.alpha);
-    ellipse(0, 0, 4, 12);
-    pop();
-}
+function pushGlow(r, g, b, blur = 24, alpha = 180) {
+  drawingContext.save();
+  drawingContext.shadowBlur = blur;
+  drawingContext.shadowColor = `rgba(${r}, ${g}, ${b}, ${alpha / 255})`;
 }
 
-/* ============================================================
-HUD
-   ============================================================ */
-function drawHUD() {
-let hint = '';
-if (!plant) {
-    hint = `🤏 捏合手指，播下 ${VEGGIES[currentKind].name}`;
-} else {
-    switch (plant.phase) {
-        case 1: hint = '✋ 手掌缓缓上抬 — 幼苗破土'; break;
-        case 2: hint = '🖐 五指张开 — 让植株绽放'; break;
-        case 3: hint = '👏 拍手 — 召唤蝴蝶来授粉'; break;
-        case 4: hint = '✊ 握拳 — 采收果实'; break;
-        case 5: hint = `🌱 ${VEGGIES[plant.kind].name} 采收完成 · 按 R 再来`; break;
-    }
+function popGlow() {
+  drawingContext.restore();
 }
 
-noStroke();
-textAlign(CENTER, CENTER);
-
-textSize(15);
-fill(190, 255, 215, 215);
- text(hint, width / 2, height - 54);
-
-textSize(11);
-fill(160, 220, 190, 105);
-text(`${VEGGIES[currentKind].name}　[1]小青菜 [2]向日葵 [3]番茄　[R]重来`,
-    width / 2, height - 26);
-
-if (started) {
-    const w = 90, h = 3;
-    const bx = width - w - 22, by = height - 22;
-    noStroke();
-    fill(255, 255, 255, 22);
-    rect(bx, by, w, h, 2);
-    fill(150, 255, 200, 160);
-    rect(bx, by, w * constrain(audioLevel * 3, 0, 1), h, 2);
-}
+function easeOutCubic(x) {
+  x = constrain(x, 0, 1);
+  return 1 - pow(1 - x, 3);
 }
 
-/* ============================================================
-交互
-   ============================================================ */
 function mousePressed() {
-    if (appState === 'intro' && introHover) beginPlay();
+  // 浏览器音频策略：点击任意位置恢复音频上下文
+  userStartAudio();
+  if (mic) mic.start();
 }
 
-function keyPressed() {
-    if (appState !== 'play') return;
-    if (key === '1') { currentKind = 'greens';    resetPlant(); }
-    if (key === '2') { currentKind = 'sunflower'; resetPlant(); }
-    if (key === '3') { currentKind = 'tomato';    resetPlant(); }
-    if (key === 'r' || key === 'R') resetPlant();
+function touchStarted() {
+  userStartAudio();
+  if (mic) mic.start();
+  return false;
 }
 
-function resetPlant() {
-    plant = null;
-    butterflies = [];
-    particles = particles.filter(p => p.ambient);
+function updateDynamicHint(g) {
+  if (!hintDiv) return;
+
+  let title = "Palm Garden 掌上菜园";
+  let line = "";
+  let small = "";
+
+  let handCount = predictions ? predictions.length : 0;
+  let handStatus = "";
+
+  if (!modelReady) {
+    handStatus = "手势模型加载中";
+  } else if (handCount === 0) {
+    handStatus = "未识别到手";
+  } else {
+    handStatus = `已识别到手：${gestureText}`;
+  }
+
+  if (garden.stage === STAGE.EMPTY) {
+    line = "第 1 步：🤏 拇指和食指捏在一起，播种";
+    small = `${handStatus}｜请把手放到画面中央，露出完整手掌`;
+  }
+
+  else if (garden.stage === STAGE.SEED) {
+    line = "第 2 步：✋ 张开手掌，并抬到画面上半区，幼苗会生长";
+    small = `${handStatus}｜不是挥手，要让整只手掌清楚出现在画面中`;
+  }
+
+  else if (garden.stage === STAGE.GROWING) {
+    let percent = floor(garden.growth * 100);
+    if (garden.growth < 0.82) {
+      line = `第 2 步：✋ 继续把手掌往上抬，植物正在生长 ${percent}%`;
+      small = `${handStatus}｜手越高，植物越高`;
+    } else {
+      line = "第 3 步：🖐 五指完全张开，让花朵绽放";
+      small = `${handStatus}｜手指之间尽量分开，掌心面对摄像头`;
+    }
+  }
+
+  else if (garden.stage === STAGE.BLOOM) {
+    line = "第 4 步：👏 拍一下手，召唤蝴蝶授粉";
+    small = `${handStatus}｜如果没有反应，请先点击页面一次再拍手`;
+  }
+
+  else if (garden.stage === STAGE.POLLINATED) {
+    line = "第 5 步：✊ 完全握拳，番茄会成熟结果";
+    small = `${handStatus}｜五根手指尽量收回掌心`;
+  }
+
+  else if (garden.stage === STAGE.FRUIT) {
+    line = "收获完成：🍅 再次 🤏 捏合，可以重新种下一棵";
+    small = `${handStatus}｜菜园图鉴已记录一次收获`;
+  }
+
+  hintDiv.html(`
+    <div class="title">${title}</div>
+    <div class="line">${line}</div>
+    <div class="small">${small}</div>
+  `);
 }
