@@ -1,0 +1,25 @@
+*{box-sizing:border-box}
+
+html,body{
+    margin:0;
+    padding:0;
+    height:100%;
+    overflow:hidden;
+    background:#eefaf1;
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+}
+
+#stage{
+    position:fixed;
+    inset:0;
+    overflow:hidden;
+}
+
+canvas{
+    display:block;
+    position:fixed;
+    inset:0;
+}
+
+/* 摄像头画面本身由 p5 绘制，这里只负责容器与滚动锁定 */
